@@ -41,6 +41,8 @@ parentPort.on('message', async (message) => {
         workerId,
         batchIndex,
         result,
+        head,
+        tail,
         lineCount: 0
       })
       return;
@@ -70,14 +72,20 @@ parentPort.on('message', async (message) => {
 
       const measurement = result.get(city);
       if (measurement === undefined) {
-        result.set(city, [temperature, temperature, temperature, 1]);
+        result.set(city, {
+          min: temperature,
+          max: temperature,
+          sum: temperature,
+          count: 1,
+          city
+        });
         continue;
       }
 
-      measurement[0] = Math.min(measurement[0], temperature);
-      measurement[1] = Math.max(measurement[1], temperature);
-      measurement[2] = measurement[2] + temperature;
-      measurement[3] += 1;
+      measurement.min = Math.min(measurement.min, temperature);
+      measurement.max = Math.max(measurement.max, temperature);
+      measurement.sum = measurement.sum + temperature;
+      measurement.count += 1;
     }
   }
 
