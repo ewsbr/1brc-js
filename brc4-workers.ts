@@ -3,9 +3,10 @@ import { setTimeout } from 'timers/promises';
 import { Worker } from 'node:worker_threads';
 
 const LOG_LINES = 10_000_000;
-const BUF_SIZE = 4096 * 1024;
-const CHUNKS_PER_BATCH = 32;
-const WORKER_POOL_SIZE = 12;
+const CHUNK_SIZE = 4096 * 1024;
+const CHUNKS_PER_BATCH = 8;
+const BATCH_SIZE = CHUNK_SIZE * CHUNKS_PER_BATCH;
+const WORKER_POOL_SIZE = 8;
 const MEASUREMENTS_FILE = 'measurements.txt'
 const WORKER_FILE = './worker.js'
 
@@ -17,8 +18,8 @@ function max(first: bigint, second: bigint): bigint {
 
 function fixObjectKeys(obj: Map<string, any>) {
   for (const [key, value] of obj.entries()) {
-    const cityName = value.at(-1);
-    const newKey = Buffer.from(cityName, 'binary').toString('utf-8');
+    // const cityName = value.at(-1);
+    const newKey = Buffer.from(key, 'binary').toString('utf-8');
     if (newKey !== key) {
       obj.set(newKey, obj.get(key));
       obj.delete(key);
@@ -49,21 +50,20 @@ function processBoundaryLines(pairs: HeadTailPairs, measurements: Map<string, an
   }
 }
 
-let totalLineCount = 0;
 const start = process.hrtime.bigint();
 const measurements: Map<string, any> = new Map();
 const unprocessedLines: HeadTailPairs = [];
 
 const { size } = await fs.stat(MEASUREMENTS_FILE);
-const totalChunks = Math.ceil(size / BUF_SIZE);
-const remainingChunks = Array.from({ length: totalChunks }, (_, i) => i)
+const totalChunks = Math.ceil(size / BATCH_SIZE);
+const remainingBatches = Array.from({ length: totalChunks }, (_, i) => i)
 
 const workerPool: Worker[] = [];
 const freeWorkers: number[] = [];
 for (let i = 0; i < WORKER_POOL_SIZE; i++) {
   const worker = new Worker(WORKER_FILE);
   worker.on('message', async (value: any) => {
-    const { workerId, chunkIndex, head, tail, result, lineCount } = value;
+    const { workerId, batchIndex, head, tail, result, lineCount } = value;
     for (const [city, temps] of result.entries()) {
       const current = measurements.get(city);
       if (!current) {
@@ -74,11 +74,10 @@ for (let i = 0; i < WORKER_POOL_SIZE; i++) {
       current[0] = Math.min(current[0], temps[0]);
       current[1] = Math.max(current[1], temps[1]);
       current[2] += temps[2];
-      current[3] += 1;
+      current[3] += temps[3];
     }
 
-    totalLineCount += lineCount;
-    unprocessedLines[chunkIndex] = [head, tail];
+    unprocessedLines[batchIndex] = [head, tail];
     freeWorkers.push(workerId);
   });
 
@@ -86,7 +85,7 @@ for (let i = 0; i < WORKER_POOL_SIZE; i++) {
   freeWorkers.push(i);
 }
 
-while (remainingChunks.length > 0) {
+while (remainingBatches.length > 0) {
   await setTimeout(0);
   if (freeWorkers.length === 0) {
     continue;
@@ -95,15 +94,16 @@ while (remainingChunks.length > 0) {
   const workerId = freeWorkers.shift()!!;
   const worker = workerPool[workerId];
 
-  const chunkIndex = remainingChunks.shift()!!;
-  if (chunkIndex % 100 === 0) {
-    console.log(`${workerId} takes ${chunkIndex}`);
+  const batchIndex = remainingBatches.shift()!!;
+  if (batchIndex % 100 === 0) {
+    console.log(`${workerId} takes ${batchIndex}`);
   }
   worker.postMessage({
     workerId,
-    chunkIndex,
+    batchIndex,
+    batchSize: BATCH_SIZE,
     chunksPerBatch: CHUNKS_PER_BATCH,
-    chunkSize: BUF_SIZE,
+    chunkSize: CHUNK_SIZE,
     fileName: MEASUREMENTS_FILE,
   })
 }
@@ -113,11 +113,12 @@ while (freeWorkers.length < WORKER_POOL_SIZE) {
 }
 
 const timeTaken = Number(process.hrtime.bigint() - start) / 1_000_000_000;
+const totalCount = unprocessedLines.length +  [...measurements.entries()].map(([_, value]) => value[3]).reduce((prev, curr) => prev + curr, 0)
 console.log({
   ...process.memoryUsage(),
   timeTaken,
-  totalLineCount,
-  linesPerSec: totalLineCount / timeTaken,
+  totalCount: totalCount,
+  linesPerSec: totalCount / timeTaken,
   throughput: (size / 1e6) / timeTaken
 });
 await Promise.all(workerPool.map(worker => worker.terminate()))
