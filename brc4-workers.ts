@@ -2,9 +2,9 @@ import fs from 'fs/promises';
 import { Worker } from 'node:worker_threads';
 
 const CHUNK_SIZE = 64 * 1024;
-const CHUNKS_PER_BATCH = 512;
+const CHUNKS_PER_BATCH = 1024;
 const BATCH_SIZE = CHUNK_SIZE * CHUNKS_PER_BATCH;
-const WORKER_POOL_SIZE = 12;
+const WORKER_POOL_SIZE = 8;
 const MEASUREMENTS_FILE = 'measurements.txt'
 const WORKER_FILE = './worker.js'
 
@@ -55,7 +55,6 @@ class TaskQueue {
     }
 
     const { job, resolve, reject } = this.queue.shift();
-    console.log('process queue', job.batchIndex);
     this.#runJob(job).then(resolve).catch(reject);
   }
 
@@ -145,7 +144,6 @@ for (const value of values) {
 
   unprocessedLines[batchIndex] = [head, tail];
 }
-console.log(values);
 
 const timeTaken = Number(process.hrtime.bigint() - start) / 1_000_000_000;
 const totalCount = unprocessedLines.length +  [...measurements.entries()].map(([_, value]) => value.count).reduce((prev, curr) => prev + curr, 0)
