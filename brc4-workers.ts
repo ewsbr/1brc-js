@@ -116,6 +116,7 @@ const timeTaken = Number(process.hrtime.bigint() - start) / 1_000_000_000;
 console.log({
   ...process.memoryUsage(),
   timeTaken,
+  totalLineCount,
   linesPerSec: totalLineCount / timeTaken,
   throughput: (size / 1e6) / timeTaken
 });

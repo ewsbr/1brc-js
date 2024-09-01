@@ -28,7 +28,7 @@ parentPort.on('message', async (message) => {
   const result = new Map();
 
   let tail = '';
-  let lineCount = 0;
+  let lineCount = 1; // head
 
   const { bytesRead } = await handle.read(buf, 0, chunkSize, chunkIndex * chunkSize);
   if (bytesRead === 0) {
@@ -43,6 +43,7 @@ parentPort.on('message', async (message) => {
 
   const lineGen = readLines(bytesRead, buf);
   const { value: head } = lineGen.next();
+
   while (true) {
     const { value, done } = lineGen.next()
     if (done) {
