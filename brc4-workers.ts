@@ -1,25 +1,72 @@
 import fs from 'fs/promises';
-import { setTimeout } from 'timers/promises';
 import { Worker } from 'node:worker_threads';
 
 const CHUNK_SIZE = 64 * 1024;
 const CHUNKS_PER_BATCH = 512;
 const BATCH_SIZE = CHUNK_SIZE * CHUNKS_PER_BATCH;
-const WORKER_POOL_SIZE = 10;
+const WORKER_POOL_SIZE = 12;
 const MEASUREMENTS_FILE = 'measurements.txt'
 const WORKER_FILE = './worker.js'
 
 type HeadTailPairs = Array<[string, string]>;
 
-function max(first: bigint, second: bigint): bigint {
-  return first > second ? first : second;
-}
+class TaskQueue {
 
-function exec<T>(worker: Worker, message: any): Promise<T> {
-  return new Promise((resolve, reject) => {
-    worker.once('message', resolve);
-    worker.once('error', reject);
-  });
+  private readonly queue: any[] = [];
+  private readonly availableWorkers: Worker[] = [];
+
+  constructor(
+    private readonly workerPool: Worker[],
+  ) {
+    this.availableWorkers = [...workerPool]
+  }
+
+  #runJob(job: any) {
+    return new Promise((resolve, reject) => {
+      const worker = this.availableWorkers.shift();
+      if (worker != null) {
+        const onMessage = (value: any) => {
+          resolve(value);
+          this.availableWorkers.push(worker);
+          this.#processQueue();
+          worker.removeListener('error', onError);
+        }
+
+        const onError = (err: unknown) => {
+          reject(err)
+          this.availableWorkers.push(worker);
+          this.#processQueue();
+          worker.removeListener('message', onMessage);
+        };
+
+        worker.once('message', onMessage);
+        worker.once('error', onError)
+
+        worker.postMessage(job);
+      } else {
+        this.queue.push({ job, resolve, reject })
+      }
+    });
+  }
+
+  #processQueue() {
+    if (this.queue.length === 0) {
+      return;
+    }
+
+    const { job, resolve, reject } = this.queue.shift();
+    console.log('process queue', job.batchIndex);
+    this.#runJob(job).then(resolve).catch(reject);
+  }
+
+  public async run(jobs: any[]): Promise<any[]> {
+    return await Promise.all(jobs.map(job => this.#runJob(job)))
+  }
+
+  public close(): Promise<number[]> {
+    return Promise.all(this.workerPool.map(worker => worker.terminate()))
+  }
+
 }
 
 function fixObjectKeys(obj: Map<string, any>) {
@@ -68,62 +115,37 @@ const unprocessedLines: HeadTailPairs = [];
 
 const { size } = await fs.stat(MEASUREMENTS_FILE);
 const totalChunks = Math.ceil(size / BATCH_SIZE);
-const remainingBatches = Array.from({ length: totalChunks }, (_, i) => i)
 
-const workerPool: Worker[] = [];
-const freeWorkers: number[] = [];
-for (let i = 0; i < WORKER_POOL_SIZE; i++) {
-  const worker = new Worker(WORKER_FILE);
-  worker.on('message', async (value: any) => {
-    const { workerId, batchIndex, head, tail, result } = value;
-    for (const [city, temps] of result.entries()) {
-      const current = measurements.get(city);
-      if (!current) {
-        measurements.set(city, temps)
-        continue;
-      }
+const workerPool: Worker[] = Array.from({ length: WORKER_POOL_SIZE }, () => new Worker(WORKER_FILE));
 
-      current.min = Math.min(current.min, temps.min);
-      current.max  = Math.max(current.max, temps.max);
-      current.sum += temps.sum;
-      current.count += temps.count;
+const taskQueue = new TaskQueue(workerPool);
+const jobs = Array.from({ length: totalChunks }, (_, i) => ({
+  batchIndex: i,
+  batchSize: BATCH_SIZE,
+  chunksPerBatch: CHUNKS_PER_BATCH,
+  chunkSize: CHUNK_SIZE,
+  fileName: MEASUREMENTS_FILE,
+}))
+
+const values = await taskQueue.run(jobs);
+for (const value of values) {
+  const { batchIndex, head, tail, result } = value;
+  for (const [city, temps] of result.entries()) {
+    const current = measurements.get(city);
+    if (!current) {
+      measurements.set(city, temps)
+      continue;
     }
 
-    unprocessedLines[batchIndex] = [head, tail];
-    freeWorkers.push(workerId);
-  });
-
-  workerPool.push(worker);
-  freeWorkers.push(i);
-}
-
-while (remainingBatches.length > 0) {
-  await setTimeout(0);
-  if (freeWorkers.length === 0) {
-    continue;
+    current.min = Math.min(current.min, temps.min);
+    current.max  = Math.max(current.max, temps.max);
+    current.sum += temps.sum;
+    current.count += temps.count;
   }
 
-  const workerId = freeWorkers.shift()!!;
-  const worker = workerPool[workerId];
-
-  const batchIndex = remainingBatches.shift()!!;
-  if (batchIndex % 100 === 0) {
-    console.log(`${workerId} takes ${batchIndex}`);
-  }
-
-  worker.postMessage({
-    workerId,
-    batchIndex,
-    batchSize: BATCH_SIZE,
-    chunksPerBatch: CHUNKS_PER_BATCH,
-    chunkSize: CHUNK_SIZE,
-    fileName: MEASUREMENTS_FILE,
-  })
+  unprocessedLines[batchIndex] = [head, tail];
 }
-
-while (freeWorkers.length < WORKER_POOL_SIZE) {
-  await setTimeout(0);
-}
+console.log(values);
 
 const timeTaken = Number(process.hrtime.bigint() - start) / 1_000_000_000;
 const totalCount = unprocessedLines.length +  [...measurements.entries()].map(([_, value]) => value.count).reduce((prev, curr) => prev + curr, 0)
@@ -134,10 +156,11 @@ console.log({
   linesPerSec: totalCount / timeTaken,
   throughput: (size / 1e6) / timeTaken
 });
-await Promise.all(workerPool.map(worker => worker.terminate()))
 
 processBoundaryLines(unprocessedLines, measurements);
 fixObjectKeys(measurements);
+
+await taskQueue.close();
 
 const results = [];
 const entries = [...measurements.entries()].sort((left, right) => left[0] > right[0] ? 1 : -1);

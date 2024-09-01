@@ -26,7 +26,7 @@ function* readLines(tail, bytesRead, buf) {
 }
 
 parentPort.on('message', async (message) => {
-  const { workerId, batchIndex, batchSize, chunksPerBatch, fileName, chunkSize } = message;
+  const { batchIndex, batchSize, chunksPerBatch, fileName, chunkSize } = message;
   const buf = Buffer.alloc(chunkSize);
   const handle = await fs.open(fileName, 'r');
   const result = new Map();
@@ -38,12 +38,10 @@ parentPort.on('message', async (message) => {
     const { bytesRead } = await handle.read(buf, 0, chunkSize, (batchIndex * batchSize) + (i * chunkSize));
     if (bytesRead === 0) {
       parentPort.postMessage({
-        workerId,
         batchIndex,
         result,
         head,
         tail,
-        lineCount: 0
       })
       return;
     }
@@ -91,7 +89,6 @@ parentPort.on('message', async (message) => {
 
   await handle.close();
   parentPort.postMessage({
-    workerId,
     batchIndex,
     head,
     tail,
